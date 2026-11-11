@@ -14,8 +14,9 @@ from types import SimpleNamespace
 import numpy as np
 import pandas as pd
 import pytest
-import sdk
 import torch
+
+import sdk
 from sdk import forecasting
 
 
@@ -626,9 +627,11 @@ def test_run_interpretability_integrated_gradients_reaches_report(monkeypatch, t
     captured = {}
 
     class EmbedModel(torch.nn.Module):
-        def embed(self, *, x_enc, input_mask):
-            captured["input_mask"] = input_mask[0].detach().cpu().tolist()
-            return SimpleNamespace(embeddings=x_enc.reshape(x_enc.shape[0], -1).sum(dim=1, keepdim=True))
+        pass
+
+    def embed_tensor(model, x_enc, input_mask):
+        captured["input_mask"] = input_mask[0].detach().cpu().tolist()
+        return x_enc.reshape(x_enc.shape[0], -1).sum(dim=1, keepdim=True)
 
     @contextmanager
     def normalization_statistics_gradient(model, *, enabled):
@@ -683,6 +686,7 @@ def test_run_interpretability_integrated_gradients_reaches_report(monkeypatch, t
         compute_per_channel_embedding_stability,
     )
     monkeypatch.setattr(ig, "integrated_gradients_embedding", integrated_gradients_embedding)
+    monkeypatch.setattr(forecasting, "_embed_tensor", embed_tensor)
     monkeypatch.setattr(forecasting, "_normalization_statistics_gradient", normalization_statistics_gradient)
     monkeypatch.setattr(forecasting, "_save_lag_horizon_artifacts", lambda *args, **kwargs: None)
     monkeypatch.setattr(forecasting, "_build_pdf_report", build_pdf_report)
@@ -781,6 +785,71 @@ def test_normalization_statistics_gradient_is_scoped():
     normalizer._get_statistics(x)
     assert not normalizer.mean.requires_grad
     assert not normalizer.stdev.requires_grad
+
+
+@pytest.mark.parametrize("correction", [0, 1])
+@pytest.mark.parametrize("case", ["regular", "constant", "missing", "masked", "all_missing"])
+def test_normalization_statistics_gradient_supports_sdm_revin(correction, case):
+    RevIN = pytest.importorskip("sdm.nn").RevIN
+    norm = RevIN()
+    x = torch.randn(2, 3, 8)
+    mask = None
+    if case == "constant":
+        x.fill_(2)
+    elif case == "missing":
+        x[0, 0, :3] = torch.nan
+        x[0, 1] = torch.nan
+    elif case == "masked":
+        mask = torch.zeros_like(x, dtype=torch.bool)
+        mask[..., :3] = True
+        mask[0, 1] = True
+    elif case == "all_missing":
+        x.fill_(torch.nan)
+    x.requires_grad_(True)
+    expected_mean, expected_std = norm.stats(x, mask, correction=correction)
+
+    with forecasting._normalization_statistics_gradient(norm, enabled=True) as patched:
+        assert patched == 1
+        mean, std = norm.stats(x, mask, correction=correction)
+        torch.testing.assert_close(mean, expected_mean)
+        torch.testing.assert_close(std, expected_std)
+        gradient = torch.autograd.grad((mean + std).sum(), x)[0]
+        assert gradient.isfinite().all()
+        excluded = x.isnan() if mask is None else x.isnan() | mask
+        torch.testing.assert_close(gradient[excluded], torch.zeros_like(gradient[excluded]))
+        if case == "regular":
+            reference = x.double().mean(dim=-1) + x.double().std(dim=-1, correction=correction)
+            expected_gradient = torch.autograd.grad(reference.sum(), x)[0]
+            torch.testing.assert_close(gradient, expected_gradient)
+
+    assert "stats" not in vars(norm)
+    mean, std = norm.stats(x, mask, correction=correction)
+    assert not mean.requires_grad
+    assert not std.requires_grad
+
+
+@pytest.mark.parametrize("instance_override", [False, True])
+def test_normalization_statistics_gradient_restores_sdm_revin_on_failure(instance_override):
+    RevIN = pytest.importorskip("sdm.nn").RevIN
+    norm = RevIN()
+    if instance_override:
+        norm.stats = norm.stats
+    original = norm.stats
+    with forecasting._normalization_statistics_gradient(norm, enabled=False) as patched:
+        assert patched == 0
+        assert norm.stats is original
+    def fail_while_patched():
+        with forecasting._normalization_statistics_gradient(norm, enabled=True):
+            outer = norm.stats
+            with forecasting._normalization_statistics_gradient(norm, enabled=True):
+                assert norm.stats is not outer
+            assert norm.stats is outer
+            raise RuntimeError("normalization failed")
+
+    with pytest.raises(RuntimeError, match="normalization failed"):
+        fail_while_patched()
+    assert norm.stats is original
+    assert ("stats" in vars(norm)) == instance_override
 
 
 def test_perform_forecasting_return_all_channels_rejects_timestamp_collision():

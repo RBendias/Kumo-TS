@@ -40,6 +40,8 @@ import numpy as np
 import torch
 
 if TYPE_CHECKING:
+    from sdm import TableTensor
+
     from channel_flow import ChannelFlowConfig
 
 Array = np.ndarray
@@ -48,11 +50,17 @@ Array = np.ndarray
 class ForecastModel(Protocol):
     """Minimal protocol for models exposing forecast and embedding interfaces."""
 
-    def __call__(self, *, x_enc: torch.Tensor, input_mask: torch.Tensor) -> Any:
-        """Forward pass returning an object with a `.forecast` tensor [B, C, H]."""
+    model: torch.nn.Module
 
-    def embed(self, *, x_enc: torch.Tensor, input_mask: torch.Tensor) -> Any:
-        """Embedding pass returning an object with `.embeddings` tensor [B, D]."""
+    def __call__(
+        self,
+        *,
+        x_context: torch.Tensor,
+        y_context: torch.Tensor,
+        x_query: torch.Tensor,
+        num_estimators: int,
+    ) -> TableTensor:
+        """Run the model's forward pass on context and query tables."""
 
 
 @dataclass(frozen=True)
@@ -334,6 +342,45 @@ def _as_numpy(x: Any) -> Array:
     return np.asarray(x)
 
 
+def _identity_recipe() -> Any:
+    """SDM recipe without standardization: `x_enc` is already standardized by the Kumo-TS standardizer."""
+    import sdm.processing as sp
+
+    return sp.Recipe(features=sp.Identity(), target=sp.Identity(), output=sp.AverageEstimators())
+
+
+def _gradient_mode() -> Any:
+    """SDM callback that only runs the model with gradients enabled."""
+    from sdm.models import Callback
+
+    class GradientMode(Callback):
+        requires_grad = True
+
+    return GradientMode()
+
+
+def _forecast_tensor(
+    model: ForecastModel,
+    x_enc: torch.Tensor,
+    input_mask: torch.Tensor,
+    *,
+    horizon: int,
+) -> torch.Tensor:
+    y_context = x_enc.transpose(-1, -2).masked_fill(~input_mask.bool().unsqueeze(-1), float("nan"))
+    # The identity recipe passes `y_context` through unchanged, so autograd reaches
+    # `x_enc` once SDM runs with gradients instead of in inference mode:
+    grad = torch.is_grad_enabled() and x_enc.requires_grad
+    out = model(
+        x_context=y_context.new_empty(*y_context.shape[:-1], 0),
+        y_context=y_context,
+        x_query=y_context.new_empty(*y_context.shape[:-2], horizon, 0),
+        recipe=_identity_recipe(),
+        num_estimators=1,
+        callbacks=(_gradient_mode(),) if grad else (),
+    )
+    return out.numerical.transpose(-1, -2)
+
+
 @torch.no_grad()
 def _forecast_autoregressive(
     model: ForecastModel,
@@ -365,8 +412,8 @@ def _forecast_autoregressive(
 
     if target_horizon <= model_horizon:
         with torch.amp.autocast("cuda", enabled=device.type == "cuda"):
-            out = model(x_enc=x_enc, input_mask=input_mask)
-        forecast = _as_numpy(out.forecast[:, :, :target_horizon]).astype(np.float32, copy=False)
+            out = _forecast_tensor(model, x_enc, input_mask, horizon=model_horizon)
+        forecast = _as_numpy(out[:, :, :target_horizon]).astype(np.float32, copy=False)
         return _finite_forecast(forecast, stage="direct forecasting")
 
     num_iters = int(np.ceil(target_horizon / model_horizon))
@@ -377,8 +424,8 @@ def _forecast_autoregressive(
 
     for _ in range(num_iters):
         with torch.amp.autocast("cuda", enabled=device.type == "cuda"):
-            out = model(x_enc=cur_x, input_mask=cur_mask)
-        chunk = out.forecast.detach()
+            out = _forecast_tensor(model, cur_x, cur_mask, horizon=model_horizon)
+        chunk = out.detach()
         if not bool(torch.isfinite(chunk).all()):
             n_bad = int((~torch.isfinite(chunk)).sum().item())
             raise FloatingPointError(
@@ -444,8 +491,7 @@ def compute_target_channel_input_jacobian_importance(
         x_t = torch.from_numpy(arr[None]).to(device=device, dtype=torch.float32).requires_grad_(True)
         m_t = torch.from_numpy(mask[None]).to(device=device, dtype=torch.long)
         with torch.enable_grad():
-            out = model(x_enc=x_t, input_mask=m_t)
-            forecast = out.forecast[:, target, :H]
+            forecast = _forecast_tensor(model, x_t, m_t, horizon=H)[:, target, :]
             if forecast.shape[-1] < H:
                 raise ValueError(f"Model returned horizon={forecast.shape[-1]}, expected at least {H}")
             if forecast.requires_grad:
@@ -505,12 +551,33 @@ def compute_target_channel_input_jacobian_importance(
     return importance.astype(np.float32, copy=False)
 
 
+def _embed_tensor(model: ForecastModel, x_enc: torch.Tensor, input_mask: torch.Tensor) -> torch.Tensor:
+    """Capture SDM encoder states and pool channels and patches to [B, 1024]."""
+    captured: list[torch.Tensor] = []
+    backbone = model.model
+    encoder_end = backbone.icl if backbone.cross_channel is None else backbone.cross_channel
+
+    def capture(module: torch.nn.Module, inputs: tuple, output: torch.Tensor) -> None:
+        # DataParallel replicas share hook registries. Only capture this replica.
+        if module is encoder_end:
+            captured.append(output.clone())
+
+    # Like Kumo-TS `embed`, pool only patches whose steps are all observed:
+    observed = input_mask.bool().unflatten(-1, (-1, backbone.patch_size)).all(dim=-1)
+    observed = observed.unsqueeze(-1).float()  # [B, patches, 1]
+
+    handle = encoder_end.register_forward_hook(capture)
+    try:
+        _forecast_tensor(model, x_enc, input_mask, horizon=1)
+    finally:
+        handle.remove()
+    (encoded,) = captured  # [B, C, patches, 1024]
+    return (encoded.float().mean(dim=-3) * observed).sum(dim=-2) / observed.sum(dim=-2)
+
+
 @torch.no_grad()
 def _embed_batch(model: ForecastModel, x_enc: torch.Tensor, input_mask: torch.Tensor) -> Array:
-    out = model.embed(x_enc=x_enc, input_mask=input_mask)
-    if not hasattr(out, "embeddings") or out.embeddings is None:
-        raise RuntimeError("model.embed(...) did not return `.embeddings`")
-    return _as_numpy(out.embeddings).astype(np.float32)
+    return _as_numpy(_embed_tensor(model, x_enc, input_mask)).astype(np.float32, copy=False)
 
 
 def _sliding_window_view(a: Array, window_shape: int, *, axis: int = 0) -> Array:

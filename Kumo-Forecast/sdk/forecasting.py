@@ -37,6 +37,7 @@ except ImportError:
 
 # Clean absolute imports - package is installed in editable mode
 from backbone.utils.utils import control_randomness
+
 from channel_stability import (
     PerChannelEmbeddingStabilityReport,
     compute_per_channel_embedding_stability,
@@ -48,6 +49,7 @@ from dataset_longhorizon import (
 from interpretability import (
     ForecastExplanation,
     TrajectoryStabilityReport,
+    _embed_tensor,
     compute_trajectory_stability,
     explain_forecast,
 )
@@ -1377,8 +1379,35 @@ def _normalization_statistics_gradient(model: torch.nn.Module, *, enabled: bool)
         yield 0
         return
 
-    restores: list[tuple[object, object, bool]] = []
+    restores: list[tuple[object, str, object, bool]] = []
     for module in model.modules():
+        if all(hasattr(module, name) for name in ("stats", "inverse", "eps")):
+            original = module.stats
+            had_instance_override = "stats" in vars(module)
+
+            def _stats(
+                self: Any,
+                x: torch.Tensor,
+                mask: torch.Tensor | None = None,
+                correction: int = 1,
+            ) -> tuple[torch.Tensor, torch.Tensor]:
+                excluded = x.isnan() if mask is None else x.isnan() | mask
+                values = x.double().masked_fill(excluded, 0)
+                count = (~excluded).sum(dim=-1, keepdim=True)
+                mean = values.sum(dim=-1, keepdim=True) / count.clamp_min(1)
+                centered = (values - mean).masked_fill(excluded, 0)
+                variance = centered.square().sum(dim=-1, keepdim=True) / count.clamp_min(1)
+                if correction != 0:
+                    variance = variance * (count.double() / (count - correction).clamp_min(1))
+                raw_stdev = variance.sqrt()
+                safe_stdev = variance.clamp_min(float(self.eps) ** 2).sqrt()
+                stdev = raw_stdev.detach() + (safe_stdev - safe_stdev.detach())
+                return mean, stdev.masked_fill(count == 0, 1)
+
+            module.stats = types.MethodType(_stats, module)
+            restores.append((module, "stats", original, had_instance_override))
+            continue
+
         if not all(hasattr(module, name) for name in ("_get_statistics", "_normalize", "eps")):
             continue
 
@@ -1399,16 +1428,16 @@ def _normalization_statistics_gradient(model: torch.nn.Module, *, enabled: bool)
             self.stdev = raw_stdev.detach() + safe_stdev - safe_stdev.detach() + self.eps
 
         module._get_statistics = types.MethodType(_get_statistics, module)
-        restores.append((module, original, had_instance_override))
+        restores.append((module, "_get_statistics", original, had_instance_override))
 
     try:
         yield len(restores)
     finally:
-        for module, original, had_instance_override in reversed(restores):
+        for module, name, original, had_instance_override in reversed(restores):
             if had_instance_override:
-                module._get_statistics = original
+                setattr(module, name, original)
             else:
-                delattr(module, "_get_statistics")
+                delattr(module, name)
 
 
 def _compute_integrated_gradients_report(
@@ -1437,8 +1466,7 @@ def _compute_integrated_gradients_report(
             raise ValueError(f"SDK embedding input must be [batch, channels, context], got {tuple(x.shape)}")
         mask = input_mask.reshape(1, -1).expand(x.shape[0], -1).to(device=x.device)
         with _normalization_statistics_gradient(model, enabled=grad_through_norm):
-            output = model.embed(x_enc=x, input_mask=mask)
-        embeddings = output.embeddings if hasattr(output, "embeddings") else output
+            embeddings = _embed_tensor(model, x, mask)
         return embeddings.reshape(embeddings.shape[0], -1)
 
     attribution = integrated_gradients_embedding(

@@ -29,6 +29,7 @@ from interpretability import (
     Array,
     ForecastModel,
     _embed_batch,
+    _embed_tensor,
     _rolling_window_sources,
 )
 
@@ -110,8 +111,7 @@ class _ChannelFlowEmbedDP(torch.nn.Module):
         self._m = model
 
     def forward(self, x_enc: torch.Tensor, input_mask: torch.Tensor) -> torch.Tensor:
-        out = self._m.embed(x_enc=x_enc, input_mask=input_mask)
-        return out.embeddings if hasattr(out, "embeddings") else out
+        return _embed_tensor(self._m, x_enc, input_mask)
 
 
 def _embed_windows_batched(
