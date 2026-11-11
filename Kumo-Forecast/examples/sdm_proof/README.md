@@ -20,7 +20,7 @@ uv pip install --python .venv/bin/python \
 
 The first run downloads the original MOMENT backbone and the Kumo-Forecast checkpoint. `--offline` restricts the original reference loader to already cached files. The demonstration was run on an NVIDIA L4 with PyTorch `2.12.1+cu130`. CPU execution is supported via `--device cpu`, with a longer runtime.
 
-The example generates `overview.svg`, `overview.png`, `results.json`, and `arrays.npz`. The SVG and JSON snapshot are committed; the PNG and numerical arrays can be regenerated. `results.json` records the SDM revision, immutable checkpoint revision, precision, source hashes, array shapes, and comparison tolerances.
+The example generates `overview.svg`, `overview.png`, `ig_comparison.svg`, `ig_comparison.png`, `results.json`, and `arrays.npz`. The SVG and JSON snapshots are committed; the PNGs and numerical arrays can be regenerated. `results.json` records the SDM revision, immutable checkpoint revision, precision, source hashes, array shapes, and comparison tolerances.
 
 ## What is checked
 
@@ -34,11 +34,27 @@ The input is a deterministic synthetic three-channel series in standardized unit
 | Padded-history embedding versus original Kumo-TS | Maximum absolute error `9.54e-7` |
 | Explanation baseline versus direct SDM at matching precision | Maximum absolute error `0` |
 | Gradient from the embedding to context inputs | Finite, nonzero; norm `4.21` |
-| Embedding Integrated Gradients, 32 steps | Finite `[3, 512]` attribution; relative completeness residual `7.33e-4` |
+| Full-history embedding Integrated Gradients, 32 steps | Finite `[3, 512]` attribution; relative completeness residual `7.33e-4` |
 | Temporal and channel attribution | Finite `[16, 24]` and `[3, 24]` arrays; normalized per horizon |
 | Per-channel embedding stability | Finite values for all three channels |
 
 Reference comparisons use float32, `rtol=1e-3`, and `atol=1e-4`. The existing Kumo-TS rollout enables autocast on CUDA, so its baseline is compared with a direct SDM call using the same autocast settings. These precision modes are recorded separately.
+
+## Integrated Gradients comparison
+
+![Original and SDM embedding attribution comparison](snapshot/ig_comparison.svg)
+
+The comparison runs the unchanged `integrated_gradients_embedding()` implementation against the original model's `.embed()` and the SDM encoder hook. Both sides use the same input, observation mask, noise-baseline seed `0`, 32 midpoint integration steps, one baseline, float32, batch size `1`, and L2 embedding objective. The normalization contextmanager uses matching statistic-gradient settings within each case.
+
+| Case | Maximum absolute attribution error | Relative L2 error | Result |
+| --- | --- | --- | --- |
+| Full history, statistic gradients enabled | `3.54e-8` | `1.17e-6` | Agreement; cosine similarity approximately `1` |
+| 384 padded steps, statistic gradients enabled | Not comparable | Not comparable | Both produce 384 non-finite values in `[3, 512]` attribution arrays |
+| Same padded input, statistic gradients disabled in both | `5.31e-8` | `2.19e-6` | Agreement; cosine similarity approximately `1` |
+
+The full-history relative completeness residual is `7.28e-4` for original Kumo-TS and `7.33e-4` for SDM. End-to-end attribution equivalence is demonstrated for this input and these settings, rather than inferred solely from embedding agreement.
+
+**The detached-statistics control is not a numerical-quality fix.** Its completeness residual is approximately `6.52` in both models: the attributions agree, but disabling derivatives through statistics does not produce the full derivative of the input-to-embedding function. With statistic gradients enabled, the padded case has non-finite derivatives in the observed region; neither implementation passes that check. The raw arrays are retained locally, non-finite counts are recorded in JSON, and non-finite values are shown in gray. They are not replaced with zero to claim agreement.
 
 ## Open result and scope
 
@@ -46,7 +62,7 @@ Reference comparisons use float32, `rtol=1e-3`, and `atol=1e-4`. The existing Ku
 
 The rolling trajectory starts with windows containing no fully observed patch. Their embeddings are undefined; the existing Kumo-TS trajectory code replaces those non-finite states with zero. This example preserves that behavior and the accompanying warning.
 
-This is a standalone interpretability integration check. The standard SDK still builds its original model; its model loader has not been migrated to SDM. The normalization contextmanager supports SDM RevIN for embedding Integrated Gradients. Surrogate fitting, retrieval/DARR, multi-GPU execution, and numerical equivalence of every XAI result between implementations are outside this example. Synthetic inputs are used to exercise the code; the plots are not a forecast-quality benchmark or a causal explanation.
+This is a standalone interpretability integration check. The standard SDK still builds its original model; its model loader has not been migrated to SDM. The normalization contextmanager supports SDM RevIN for embedding Integrated Gradients; the padded end-to-end gradient failure described above remains open. Surrogate fitting, retrieval/DARR, multi-GPU execution, and numerical equivalence of every XAI result between implementations are outside this example. Synthetic inputs are used to exercise the code; the plots are not a forecast-quality benchmark or a causal explanation.
 
 ## Regression checks
 

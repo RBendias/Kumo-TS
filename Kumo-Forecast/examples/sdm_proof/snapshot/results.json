@@ -5,13 +5,15 @@
   "checkpoint_revision": "abff20a58834638b28227ff4ab934f26206e4b09",
   "torch_version": "2.12.1+cu130",
   "device": "cuda",
+  "reference_forecast_horizon": 72,
+  "xai_forecast_horizon": 24,
   "reference_comparison_precision": "float32",
   "pipeline_precision": "CUDA autocast float16",
   "source_sha256": {
     "interpretability.py": "50a24328e12e970f3982705f5d96ef4a04e17d2e74382cce075bbc38bab3e98b",
     "channel_flow.py": "93267dd112dd2be484a9ba01ea38c4f177257f14723bc63d37257c4be431adfb",
     "sdk/forecasting.py": "bd7bed7c9fabdbf5cd2710d751ee22d7eaea8ecfb7ca72b9bf1e4e01f9f6ac8d",
-    "examples/sdm_interpretability_proof.py": "8fe4e0ce89b2677f8d568258b5a4de154a74a798eb6b3172d4774cb1dd8f536a"
+    "examples/sdm_interpretability_proof.py": "5b602d2a007462848562c2f7d411f7667eea4f31d986b1a4815aed41e039649a"
   },
   "checks": {
     "direct_sdm_forecast": {
@@ -55,6 +57,44 @@
       "close": true,
       "rtol": 0.001,
       "atol": 0.0001
+    },
+    "ig_full_history": {
+      "max_absolute_error": 3.5390257835388184e-08,
+      "relative_l2_error": 1.1706110853992868e-06,
+      "close": true,
+      "rtol": 0.001,
+      "atol": 1e-05,
+      "cosine_similarity": 0.9999999999994454,
+      "original_convergence_delta": 0.0007279315211255078,
+      "sdm_convergence_delta": 0.000732634889882663,
+      "original_embedding_delta": -0.10930252075195312,
+      "sdm_embedding_delta": -0.10930252075195312
+    },
+    "ig_padded_history": {
+      "max_absolute_error": null,
+      "relative_l2_error": null,
+      "close": false,
+      "nonfinite_sdm": 384,
+      "nonfinite_original": 384,
+      "rtol": 0.001,
+      "atol": 1e-05,
+      "cosine_similarity": null,
+      "original_convergence_delta": null,
+      "sdm_convergence_delta": null,
+      "original_embedding_delta": -0.023420333862304688,
+      "sdm_embedding_delta": -0.023420333862304688
+    },
+    "ig_padded_detached_stats": {
+      "max_absolute_error": 5.3085386753082275e-08,
+      "relative_l2_error": 2.1946655124338577e-06,
+      "close": true,
+      "rtol": 0.001,
+      "atol": 1e-05,
+      "cosine_similarity": 0.9999999999977015,
+      "original_convergence_delta": 6.519337511937617,
+      "sdm_convergence_delta": 6.519376959368188,
+      "original_embedding_delta": -0.023420333862304688,
+      "sdm_embedding_delta": -0.023420333862304688
     }
   },
   "context_gradient_norm": 4.21182918548584,
@@ -101,10 +141,65 @@
     ],
     "channel_stability": [
       3
+    ],
+    "original_ig_full_history": [
+      3,
+      512
+    ],
+    "sdm_ig_full_history": [
+      3,
+      512
+    ],
+    "original_ig_padded_history": [
+      3,
+      512
+    ],
+    "sdm_ig_padded_history": [
+      3,
+      512
+    ],
+    "original_ig_padded_detached_stats": [
+      3,
+      512
+    ],
+    "sdm_ig_padded_detached_stats": [
+      3,
+      512
     ]
   },
   "ig_steps": 32,
   "ig_convergence_delta": 0.000732634889882663,
+  "ig_settings": {
+    "baseline": "noise",
+    "seed": 0,
+    "reduce": "l2",
+    "internal_batch_size": 1,
+    "n_baselines": 1,
+    "normalization_statistic_gradients": {
+      "full_history": true,
+      "padded_history": true,
+      "padded_detached_stats": false
+    }
+  },
+  "array_nonfinite_counts": {
+    "sdm_forecast": 0,
+    "reference_forecast": 0,
+    "padded_sdm_forecast": 0,
+    "padded_reference_forecast": 0,
+    "sdm_embedding": 0,
+    "reference_embedding": 0,
+    "lag_attribution": 0,
+    "channel_attribution": 0,
+    "latent_trajectory": 0,
+    "embedding_ig": 0,
+    "channel_stability": 0,
+    "original_ig_full_history": 0,
+    "sdm_ig_full_history": 0,
+    "original_ig_padded_history": 384,
+    "sdm_ig_padded_history": 384,
+    "original_ig_padded_detached_stats": 0,
+    "sdm_ig_padded_detached_stats": 0
+  },
   "channel_stability": [
     0.057063277810811996,
     0.08159070461988449,
@@ -114,8 +209,7 @@
     "Padded forecasts currently differ from the original Kumo-TS model; this is reported, not hidden.",
     "Surrogate fitting, retrieval/DARR, and multi-GPU execution are not exercised by this example.",
     "Embedding IG explains the embedding norm; latent-flow attribution is a heuristic, not a causal claim.",
-    "Rolling windows with no fully observed patch have undefined embeddings; the existing pipeline replaces these with zero."
-  ],
-  "reference_forecast_horizon": 72,
-  "xai_forecast_horizon": 24
+    "Rolling windows with no fully observed patch have undefined embeddings; the existing pipeline replaces these with zero.",
+    "Padded IG with normalization-statistic gradients may be non-finite; raw arrays and counts are retained for diagnosis."
+  ]
 }

@@ -7,6 +7,7 @@ import argparse
 import gc
 import hashlib
 import json
+import math
 import shutil
 import subprocess
 import sys
@@ -36,16 +37,85 @@ SDM_REVISION = "083995260db6762bb8cb4f111098bd1e16bfd643"
 CHANNELS = ["Demand", "Temperature", "Promotion"]
 
 
-def comparison(actual: torch.Tensor, expected: torch.Tensor) -> dict:
+def comparison(actual: torch.Tensor, expected: torch.Tensor, *, atol: float = 1e-4) -> dict:
     actual, expected = actual.detach().float(), expected.detach().float()
+    nonfinite_actual = (~actual.isfinite()).sum().item()
+    nonfinite_expected = (~expected.isfinite()).sum().item()
+    if nonfinite_actual or nonfinite_expected:
+        return {
+            "max_absolute_error": None, "relative_l2_error": None, "close": False,
+            "nonfinite_sdm": nonfinite_actual, "nonfinite_original": nonfinite_expected,
+            "rtol": 1e-3, "atol": atol,
+        }
     error = actual - expected
     return {
         "max_absolute_error": error.abs().max().item(),
         "relative_l2_error": (error.norm() / expected.norm().clamp_min(1e-12)).item(),
-        "close": torch.allclose(actual, expected, rtol=1e-3, atol=1e-4),
+        "close": torch.allclose(actual, expected, rtol=1e-3, atol=atol),
         "rtol": 1e-3,
-        "atol": 1e-4,
+        "atol": atol,
     }
+
+
+def embedding_ig(
+    model, context: torch.Tensor, mask: torch.Tensor, steps: int, *, original: bool, grad_through_norm: bool
+):
+    def embed_fn(values: torch.Tensor) -> torch.Tensor:
+        observed = mask.expand(values.shape[0], -1)
+        with _normalization_statistics_gradient(model, enabled=grad_through_norm):
+            if original:
+                return model.embed(x_enc=values, input_mask=observed).embeddings
+            return _embed_tensor(model, values, observed)
+
+    return integrated_gradients_embedding(
+        embed_fn, context[0], baseline="noise", n_steps=steps,
+        internal_batch_size=1, reduce="l2", seed=0, device=context.device,
+    )
+
+
+def save_ig_figure(output: Path, arrays: dict, checks: dict, steps: int) -> None:
+    figure, axes = plt.subplots(3, 3, figsize=(16, 10), layout="constrained")
+    figure.suptitle(
+        f"Original Kumo-TS vs SDM Integrated Gradients | {steps} steps, noise seed 0, embedding L2\n"
+        "Matching normalization-gradient settings within each row; gray marks non-finite values",
+        fontsize=14,
+    )
+    cmap = plt.colormaps["RdBu_r"].copy()
+    cmap.set_bad("#bdbdbd")
+    for row, name in enumerate(("full_history", "padded_history", "padded_detached_stats")):
+        original = arrays[f"original_ig_{name}"]
+        sdm = arrays[f"sdm_ig_{name}"]
+        difference = sdm - original
+        limit = max(
+            float(np.abs(original[np.isfinite(original)]).max(initial=0)),
+            float(np.abs(sdm[np.isfinite(sdm)]).max(initial=0)), 1e-12,
+        )
+        for column, values, title in [(0, original, "Original Kumo-TS"), (1, sdm, "SDM")]:
+            image = axes[row, column].imshow(values, aspect="auto", cmap=cmap, vmin=-limit, vmax=limit)
+            mode = "stats gradients off" if name == "padded_detached_stats" else "stats gradients on"
+            axes[row, column].set(title=f"{name.replace('_', ' ')}: {title}\n{mode}", xlabel="Context time step")
+            axes[row, column].set_yticks(range(3), CHANNELS)
+            figure.colorbar(image, ax=axes[row, column], label="Signed IG attribution")
+        difference_limit = max(float(np.abs(difference[np.isfinite(difference)]).max(initial=0)), 1e-12)
+        image = axes[row, 2].imshow(
+            difference, aspect="auto", cmap=cmap, vmin=-difference_limit, vmax=difference_limit
+        )
+        result = checks[f"ig_{name}"]
+        if result["max_absolute_error"] is None:
+            title = f"Not comparable: non-finite IG\noriginal {result['nonfinite_original']}, SDM {result['nonfinite_sdm']}"
+        else:
+            title = (
+                f"SDM - original | max {result['max_absolute_error']:.3g}\n"
+                f"relative L2 {result['relative_l2_error']:.3g}; cosine {result['cosine_similarity']:.8f}"
+            )
+        axes[row, 2].set(title=title, xlabel="Context time step")
+        axes[row, 2].set_yticks(range(3), CHANNELS)
+        figure.colorbar(image, ax=axes[row, 2], label="Difference (own color scale)")
+    figure.savefig(output / "ig_comparison.png", dpi=150)
+    svg = output / "ig_comparison.svg"
+    figure.savefig(svg, metadata={"Date": None})
+    svg.write_text("\n".join(line.rstrip() for line in svg.read_text().splitlines()) + "\n")
+    plt.close(figure)
 
 
 def save_figure(output: Path, series: np.ndarray, arrays: dict, checks: dict, pipeline_precision: str) -> None:
@@ -89,20 +159,22 @@ def save_figure(output: Path, series: np.ndarray, arrays: dict, checks: dict, pi
         "Same pretrained checkpoint, evaluation mode",
         "Reference comparisons: float32",
         f"XAI baseline: {pipeline_precision}",
-        "Agreement threshold: rtol=1e-3, atol=1e-4",
+        "Forecast/embedding: rtol=1e-3, atol=1e-4",
+        "Integrated Gradients: rtol=1e-3, atol=1e-5",
         "",
     ]
     for name, result in checks.items():
         if isinstance(result, dict) and "max_absolute_error" in result:
             status = "PASS" if result["close"] else "OPEN"
-            rows.append(f"{status:4s} {name}: {result['max_absolute_error']:.3g}")
+            value = result["max_absolute_error"]
+            rows.append(f"{status:4s} {name}: {value:.3g}" if value is not None else f"OPEN {name}: non-finite IG")
     rows.extend([
         "", "PASS finite, nonzero gradients to context inputs",
-        "PASS finite XAI arrays and attribution normalization",
+        "PASS finite full-history XAI and attribution normalization",
         "", "Synthetic signals; this is an integration check,",
         "not a forecast-quality or causal-explanation benchmark.",
     ])
-    axes[2, 1].text(0, 1, "\n".join(rows), va="top", family="monospace", fontsize=10)
+    axes[2, 1].text(0, 1, "\n".join(rows), va="top", family="monospace", fontsize=9)
     figure.savefig(output / "overview.png", dpi=150)
     svg = output / "overview.svg"
     figure.savefig(svg, metadata={"Date": None})
@@ -142,6 +214,17 @@ def main() -> None:
         reference_embedding = reference.embed(x_enc=x, input_mask=mask).embeddings.float()
         padded_reference_forecast = reference(x_enc=padded_x, input_mask=padded_mask).forecast.float()
         padded_reference_embedding = reference.embed(x_enc=padded_x, input_mask=padded_mask).embeddings.float()
+    cases = {
+        "full_history": (x, mask, True),
+        "padded_history": (padded_x, padded_mask, True),
+        "padded_detached_stats": (padded_x, padded_mask, False),
+    }
+    original_ig = {}
+    for name, (context, observed, grad_through_norm) in cases.items():
+        print(f"Original Kumo-TS Integrated Gradients: {name}", flush=True)
+        original_ig[name] = embedding_ig(
+            reference, context, observed, args.ig_steps, original=True, grad_through_norm=grad_through_norm
+        )
     clear_model_cache()
     del reference
     gc.collect()
@@ -201,10 +284,32 @@ def main() -> None:
     context = x.clone().requires_grad_(True)
     gradient = torch.autograd.grad(embed_fn(context).square().sum(), context)[0]
     assert gradient.isfinite().all() and gradient.norm() > 0
-    ig = integrated_gradients_embedding(
-        embed_fn, x[0], baseline="noise", n_steps=args.ig_steps,
-        internal_batch_size=1, reduce="l2", seed=0, device=device,
-    )
+    sdm_ig = {}
+    for name, (values, observed, grad_through_norm) in cases.items():
+        print(f"SDM Integrated Gradients: {name}", flush=True)
+        sdm_ig[name] = embedding_ig(
+            model, values, observed, args.ig_steps, original=False, grad_through_norm=grad_through_norm
+        )
+        actual, expected = torch.from_numpy(sdm_ig[name].attribution), torch.from_numpy(original_ig[name].attribution)
+        result = comparison(actual, expected, atol=1e-5)
+        if result["max_absolute_error"] is not None:
+            a, b = actual.double().flatten(), expected.double().flatten()
+            result["cosine_similarity"] = ((a @ b) / (a.norm() * b.norm()).clamp_min(1e-12)).clamp(-1, 1).item()
+        else:
+            result["cosine_similarity"] = None
+        for prefix, attribution in [("original", original_ig[name]), ("sdm", sdm_ig[name])]:
+            value = attribution.convergence_delta
+            result[f"{prefix}_convergence_delta"] = value if math.isfinite(value) else None
+        result["original_embedding_delta"] = original_ig[name].embedding_delta
+        result["sdm_embedding_delta"] = sdm_ig[name].embedding_delta
+        checks[f"ig_{name}"] = result
+        print(json.dumps({f"ig_{name}": result}, indent=2), flush=True)
+        if name != "padded_history":
+            assert actual.isfinite().all() and expected.isfinite().all()
+        if name.startswith("padded"):
+            assert torch.count_nonzero(actual[:, :384]) == 0
+            assert torch.count_nonzero(expected[:, :384]) == 0
+    ig = sdm_ig["full_history"]
     print("Checking per-channel embedding stability", flush=True)
     stability = compute_per_channel_embedding_stability(
         model, series[:, :512], seq_len=512, device=device,
@@ -223,8 +328,12 @@ def main() -> None:
         "embedding_ig": ig.attribution,
         "channel_stability": stability.lip_ratio_mean,
     }
+    for name in cases:
+        arrays[f"original_ig_{name}"] = original_ig[name].attribution
+        arrays[f"sdm_ig_{name}"] = sdm_ig[name].attribution
     for name, values in arrays.items():
-        assert np.isfinite(values).all(), name
+        if name not in ("original_ig_padded_history", "sdm_ig_padded_history"):
+            assert np.isfinite(values).all(), name
     import sdm
 
     source = Path(sdm.__file__).resolve().parents[1]
@@ -244,17 +353,23 @@ def main() -> None:
         "checks": checks, "context_gradient_norm": gradient.norm().item(),
         "array_shapes": {name: list(values.shape) for name, values in arrays.items()},
         "ig_steps": ig.n_steps, "ig_convergence_delta": ig.convergence_delta,
+        "ig_settings": {"baseline": "noise", "seed": 0, "reduce": "l2", "internal_batch_size": 1,
+                        "n_baselines": 1,
+                        "normalization_statistic_gradients": {name: case[2] for name, case in cases.items()}},
+        "array_nonfinite_counts": {name: int((~np.isfinite(values)).sum()) for name, values in arrays.items()},
         "channel_stability": stability.lip_ratio_mean.tolist(),
         "limits": [
             "Padded forecasts currently differ from the original Kumo-TS model; this is reported, not hidden.",
             "Surrogate fitting, retrieval/DARR, and multi-GPU execution are not exercised by this example.",
             "Embedding IG explains the embedding norm; latent-flow attribution is a heuristic, not a causal claim.",
             "Rolling windows with no fully observed patch have undefined embeddings; the existing pipeline replaces these with zero.",
+            "Padded IG with normalization-statistic gradients may be non-finite; raw arrays and counts are retained for diagnosis.",
         ],
     }
-    (args.output / "results.json").write_text(json.dumps(metadata, indent=2) + "\n")
+    (args.output / "results.json").write_text(json.dumps(metadata, indent=2, allow_nan=False) + "\n")
     np.savez_compressed(args.output / "arrays.npz", **arrays)
     save_figure(args.output, series, arrays, checks, metadata["pipeline_precision"])
+    save_ig_figure(args.output, arrays, checks, args.ig_steps)
     print(f"Saved proof artifacts to {args.output.resolve()}", flush=True)
 
 
