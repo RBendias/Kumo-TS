@@ -18,6 +18,7 @@ from channel_stability import compute_per_channel_embedding_stability
 from interpretability import (
     _embed_tensor,
     _forecast_autoregressive,
+    _forecast_tensor,
     _identity_recipe,
     compute_target_channel_input_jacobian_importance,
     explain_forecast,
@@ -30,21 +31,21 @@ KumoForecast = forecast_module.KumoForecast
 @pytest.fixture(params=[False, True], ids=["temporal", "cross_channel"])
 def model(request, monkeypatch):
     backbone = forecast_module._KumoForecast
-    monkeypatch.setattr(
-        forecast_module,
-        "_KumoForecast",
-        lambda **kwargs: backbone(
-            **kwargs,
-            context_size=16,
-            prediction_size=4,
-            patch_size=4,
-            channels=8,
-            hidden_channels=16,
-            num_layers=1,
-            num_heads=2,
-            cross_channel_heads=2,
-        ),
-    )
+    class TinyKumoForecast(backbone):
+        def __init__(self, **kwargs):
+            super().__init__(
+                **kwargs,
+                context_size=16,
+                prediction_size=4,
+                patch_size=4,
+                channels=8,
+                hidden_channels=16,
+                num_layers=1,
+                num_heads=2,
+                cross_channel_heads=2,
+            )
+
+    monkeypatch.setattr(forecast_module, "_KumoForecast", TinyKumoForecast)
     return KumoForecast(cross_channel=request.param, pretrained=False)
 
 
@@ -222,3 +223,18 @@ def test_multigpu_channel_flow_matches_single_device(model):
     np.testing.assert_allclose(
         actual.per_channel_flow, expected.per_channel_flow, rtol=1e-4, atol=1e-6, equal_nan=True
     )
+
+
+@pytest.mark.parametrize("output", ["forecast", "embedding"])
+def test_input_gradients_work_with_frozen_model(model, output):
+    model.requires_grad_(False)
+    context = torch.randn(2, 2, 16, requires_grad=True)
+    mask = torch.ones(2, 16, dtype=torch.long)
+    if output == "forecast":
+        values = _forecast_tensor(model, context, mask, horizon=3)
+    else:
+        values = _embed_tensor(model, context, mask)
+    gradient = torch.autograd.grad(values.square().sum(), context)[0]
+    assert gradient.isfinite().all()
+    assert gradient.norm() > 0
+    assert all(parameter.grad is None for parameter in model.parameters())

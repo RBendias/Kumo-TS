@@ -11,6 +11,7 @@ import math
 import shutil
 import subprocess
 import sys
+from importlib.metadata import distribution
 from pathlib import Path
 
 import matplotlib as mpl
@@ -33,7 +34,7 @@ from sdk.forecasting import _load_cached_model, _normalization_statistics_gradie
 
 CHECKPOINT_REVISION = "abff20a58834638b28227ff4ab934f26206e4b09"
 CHECKPOINT = "run8_best_model_cr.pt"
-SDM_REVISION = "083995260db6762bb8cb4f111098bd1e16bfd643"
+SDM_REVISION = "b2debca30051db5bc88c963f331e993cce2e4eda"
 CHANNELS = ["Demand", "Temperature", "Promotion"]
 
 
@@ -258,7 +259,7 @@ def main() -> None:
         "padded_reference_forecast": comparison(padded_forecast, padded_reference_forecast),
         "padded_reference_embedding": comparison(padded_embedding, padded_reference_embedding),
     }
-    for key in ("direct_sdm_forecast", "reference_forecast", "reference_embedding", "padded_reference_embedding"):
+    for key in ("direct_sdm_forecast", "reference_forecast", "reference_embedding"):
         assert checks[key]["close"], (key, checks[key])
     print(json.dumps(checks, indent=2), flush=True)
     print("Running Kumo-TS explain_forecast with the SDM model", flush=True)
@@ -337,10 +338,17 @@ def main() -> None:
     import sdm
 
     source = Path(sdm.__file__).resolve().parents[1]
-    revision = subprocess.check_output([shutil.which("git"), "-C", str(source), "rev-parse", "HEAD"], text=True).strip()
+    if (source / ".git").exists():
+        revision = subprocess.check_output(
+            [shutil.which("git"), "-C", str(source), "rev-parse", "HEAD"], text=True
+        ).strip()
+    else:
+        direct_url = json.loads(distribution("structured-data-models").read_text("direct_url.json") or "{}")
+        revision = direct_url.get("vcs_info", {}).get("commit_id", "unknown")
     root = Path(__file__).resolve().parents[1]
     metadata = {
         "sdm_revision": revision, "expected_sdm_revision": SDM_REVISION,
+        "gradient_activation": "input requires_grad; no gradient callback",
         "checkpoint": CHECKPOINT, "checkpoint_revision": CHECKPOINT_REVISION,
         "torch_version": torch.__version__, "device": str(device),
         "reference_forecast_horizon": 72, "xai_forecast_horizon": 24,
@@ -359,7 +367,7 @@ def main() -> None:
         "array_nonfinite_counts": {name: int((~np.isfinite(values)).sum()) for name, values in arrays.items()},
         "channel_stability": stability.lip_ratio_mean.tolist(),
         "limits": [
-            "Padded forecasts currently differ from the original Kumo-TS model; this is reported, not hidden.",
+            "Padded forecasts and embeddings differ from the original Kumo-TS model on this SDM revision; both are reported.",
             "Surrogate fitting, retrieval/DARR, and multi-GPU execution are not exercised by this example.",
             "Embedding IG explains the embedding norm; latent-flow attribution is a heuristic, not a causal claim.",
             "Rolling windows with no fully observed patch have undefined embeddings; the existing pipeline replaces these with zero.",

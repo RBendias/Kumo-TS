@@ -824,8 +824,8 @@ def test_normalization_statistics_gradient_supports_sdm_revin(correction, case):
 
     assert "stats" not in vars(norm)
     mean, std = norm.stats(x, mask, correction=correction)
-    assert not mean.requires_grad
-    assert not std.requires_grad
+    assert mean.requires_grad == expected_mean.requires_grad
+    assert std.requires_grad == expected_std.requires_grad
 
 
 @pytest.mark.parametrize("instance_override", [False, True])
@@ -835,9 +835,13 @@ def test_normalization_statistics_gradient_restores_sdm_revin_on_failure(instanc
     if instance_override:
         norm.stats = norm.stats
     original = norm.stats
+    x = torch.randn(2, 3, 8, requires_grad=True)
     with forecasting._normalization_statistics_gradient(norm, enabled=False) as patched:
-        assert patched == 0
-        assert norm.stats is original
+        assert patched == 1
+        mean, std = norm.stats(x)
+        assert not mean.requires_grad
+        assert not std.requires_grad
+    assert norm.stats is original
     def fail_while_patched():
         with forecasting._normalization_statistics_gradient(norm, enabled=True):
             outer = norm.stats

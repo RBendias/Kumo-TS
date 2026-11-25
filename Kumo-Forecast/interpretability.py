@@ -349,16 +349,6 @@ def _identity_recipe() -> Any:
     return sp.Recipe(features=sp.Identity(), target=sp.Identity(), output=sp.AverageEstimators())
 
 
-def _gradient_mode() -> Any:
-    """SDM callback that only runs the model with gradients enabled."""
-    from sdm.models import Callback
-
-    class GradientMode(Callback):
-        requires_grad = True
-
-    return GradientMode()
-
-
 def _forecast_tensor(
     model: ForecastModel,
     x_enc: torch.Tensor,
@@ -367,16 +357,12 @@ def _forecast_tensor(
     horizon: int,
 ) -> torch.Tensor:
     y_context = x_enc.transpose(-1, -2).masked_fill(~input_mask.bool().unsqueeze(-1), float("nan"))
-    # The identity recipe passes `y_context` through unchanged, so autograd reaches
-    # `x_enc` once SDM runs with gradients instead of in inference mode:
-    grad = torch.is_grad_enabled() and x_enc.requires_grad
     out = model(
         x_context=y_context.new_empty(*y_context.shape[:-1], 0),
         y_context=y_context,
         x_query=y_context.new_empty(*y_context.shape[:-2], horizon, 0),
         recipe=_identity_recipe(),
         num_estimators=1,
-        callbacks=(_gradient_mode(),) if grad else (),
     )
     return out.numerical.transpose(-1, -2)
 

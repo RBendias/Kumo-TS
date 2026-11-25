@@ -1,0 +1,189 @@
+{
+  "sdm_revision": "b2debca30051db5bc88c963f331e993cce2e4eda",
+  "checkpoint": "run8_best_model_cr.pt",
+  "checkpoint_revision": "abff20a58834638b28227ff4ab934f26206e4b09",
+  "torch_version": "2.12.1+cu130",
+  "device": "cuda",
+  "baseline_fork_revision": "e87ff32f3723c238d61b4b1f8677669774e61fce",
+  "baseline_callback_source_sha256": "d997f542ad73dfc6fcaaafebddd3646449571d99926941ba8b93c8412883cd27",
+  "comparison": "Legacy requires_grad callback versus automatic input-gradient detection, both on the same SDM main revision and with matching explicit normalization-statistic gradient settings.",
+  "all_arrays_exactly_equal": true,
+  "context_gradient_norm_before": 4.21182918548584,
+  "context_gradient_norm_after": 4.21182918548584,
+  "arrays": {
+    "sdm_forecast": {
+      "shape": [
+        3,
+        24
+      ],
+      "exactly_equal_including_nan_positions": true,
+      "max_absolute_error_finite": 0.0,
+      "nonfinite_before": 0,
+      "nonfinite_after": 0
+    },
+    "reference_forecast": {
+      "shape": [
+        3,
+        24
+      ],
+      "exactly_equal_including_nan_positions": true,
+      "max_absolute_error_finite": 0.0,
+      "nonfinite_before": 0,
+      "nonfinite_after": 0
+    },
+    "padded_sdm_forecast": {
+      "shape": [
+        3,
+        24
+      ],
+      "exactly_equal_including_nan_positions": true,
+      "max_absolute_error_finite": 0.0,
+      "nonfinite_before": 0,
+      "nonfinite_after": 0
+    },
+    "padded_reference_forecast": {
+      "shape": [
+        3,
+        24
+      ],
+      "exactly_equal_including_nan_positions": true,
+      "max_absolute_error_finite": 0.0,
+      "nonfinite_before": 0,
+      "nonfinite_after": 0
+    },
+    "sdm_embedding": {
+      "shape": [
+        1,
+        1024
+      ],
+      "exactly_equal_including_nan_positions": true,
+      "max_absolute_error_finite": 0.0,
+      "nonfinite_before": 0,
+      "nonfinite_after": 0
+    },
+    "reference_embedding": {
+      "shape": [
+        1,
+        1024
+      ],
+      "exactly_equal_including_nan_positions": true,
+      "max_absolute_error_finite": 0.0,
+      "nonfinite_before": 0,
+      "nonfinite_after": 0
+    },
+    "lag_attribution": {
+      "shape": [
+        16,
+        24
+      ],
+      "exactly_equal_including_nan_positions": true,
+      "max_absolute_error_finite": 0.0,
+      "nonfinite_before": 0,
+      "nonfinite_after": 0
+    },
+    "channel_attribution": {
+      "shape": [
+        3,
+        24
+      ],
+      "exactly_equal_including_nan_positions": true,
+      "max_absolute_error_finite": 0.0,
+      "nonfinite_before": 0,
+      "nonfinite_after": 0
+    },
+    "latent_trajectory": {
+      "shape": [
+        536,
+        1024
+      ],
+      "exactly_equal_including_nan_positions": true,
+      "max_absolute_error_finite": 0.0,
+      "nonfinite_before": 0,
+      "nonfinite_after": 0
+    },
+    "embedding_ig": {
+      "shape": [
+        3,
+        512
+      ],
+      "exactly_equal_including_nan_positions": true,
+      "max_absolute_error_finite": 0.0,
+      "nonfinite_before": 0,
+      "nonfinite_after": 0
+    },
+    "channel_stability": {
+      "shape": [
+        3
+      ],
+      "exactly_equal_including_nan_positions": true,
+      "max_absolute_error_finite": 0.0,
+      "nonfinite_before": 0,
+      "nonfinite_after": 0
+    },
+    "original_ig_full_history": {
+      "shape": [
+        3,
+        512
+      ],
+      "exactly_equal_including_nan_positions": true,
+      "max_absolute_error_finite": 0.0,
+      "nonfinite_before": 0,
+      "nonfinite_after": 0
+    },
+    "sdm_ig_full_history": {
+      "shape": [
+        3,
+        512
+      ],
+      "exactly_equal_including_nan_positions": true,
+      "max_absolute_error_finite": 0.0,
+      "nonfinite_before": 0,
+      "nonfinite_after": 0
+    },
+    "original_ig_padded_history": {
+      "shape": [
+        3,
+        512
+      ],
+      "exactly_equal_including_nan_positions": true,
+      "max_absolute_error_finite": 0.0,
+      "nonfinite_before": 384,
+      "nonfinite_after": 384
+    },
+    "sdm_ig_padded_history": {
+      "shape": [
+        3,
+        512
+      ],
+      "exactly_equal_including_nan_positions": true,
+      "max_absolute_error_finite": 0.0,
+      "nonfinite_before": 384,
+      "nonfinite_after": 384
+    },
+    "original_ig_padded_detached_stats": {
+      "shape": [
+        3,
+        512
+      ],
+      "exactly_equal_including_nan_positions": true,
+      "max_absolute_error_finite": 0.0,
+      "nonfinite_before": 0,
+      "nonfinite_after": 0
+    },
+    "sdm_ig_padded_detached_stats": {
+      "shape": [
+        3,
+        512
+      ],
+      "exactly_equal_including_nan_positions": true,
+      "max_absolute_error_finite": 0.0,
+      "nonfinite_before": 0,
+      "nonfinite_after": 0
+    }
+  },
+  "limits": [
+    "Matching non-finite values in padded Integrated Gradients do not establish valid attributions.",
+    "This compares callback activation on latest main, not every historical SDM revision.",
+    "Surrogate fitting, DARR and multi-GPU execution were not included in the pretrained comparison."
+  ]
+}

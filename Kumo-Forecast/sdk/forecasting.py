@@ -1374,11 +1374,7 @@ def _feature_axis_embedding_stability_page(
 
 @contextmanager
 def _normalization_statistics_gradient(model: torch.nn.Module, *, enabled: bool):
-    """Temporarily include supported normalization statistics in autograd."""
-    if not enabled:
-        yield 0
-        return
-
+    """Temporarily set whether supported normalization statistics use autograd."""
     restores: list[tuple[object, str, object, bool]] = []
     for module in model.modules():
         if all(hasattr(module, name) for name in ("stats", "inverse", "eps")):
@@ -1404,11 +1400,11 @@ def _normalization_statistics_gradient(model: torch.nn.Module, *, enabled: bool)
                 stdev = raw_stdev.detach() + (safe_stdev - safe_stdev.detach())
                 return mean, stdev.masked_fill(count == 0, 1)
 
-            module.stats = types.MethodType(_stats, module)
+            module.stats = types.MethodType(_stats, module) if enabled else torch.no_grad()(original)
             restores.append((module, "stats", original, had_instance_override))
             continue
 
-        if not all(hasattr(module, name) for name in ("_get_statistics", "_normalize", "eps")):
+        if not enabled or not all(hasattr(module, name) for name in ("_get_statistics", "_normalize", "eps")):
             continue
 
         original = module._get_statistics
